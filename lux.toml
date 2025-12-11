@@ -1,0 +1,7 @@
+[package]
+name = "test-robot"
+version = "0.1.0"
+
+[dependencies]
+opencv = ">=4.8"
+eigen = ">=3.4"
