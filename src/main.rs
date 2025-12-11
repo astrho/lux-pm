@@ -1,6 +1,9 @@
-use clap::{Parser, Subcommand};
 mod manifest;
+mod resolver;
+
 use manifest::Manifest;
+use resolver::Resolver;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::fs;
 use anyhow::Result;
@@ -14,7 +17,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Install { package: String },
+    /// Install packages from lux.toml or by name
+    Install { 
+        #[arg(default_value = "")]
+        package: String 
+    },
+    
+    /// List installed packages and cache stats
     List,
 }
 
@@ -30,26 +39,41 @@ fn init_cache() -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     init_cache()?;
     
     let cli = Cli::parse();
     
     match cli.command {
         Commands::Install { package } => {
-            if let Ok(manifest) = Manifest::from_file("lux.toml") {
+            // Get dependencies
+            let specs = if package.is_empty() {
+                // Read from lux.toml
+                let manifest = Manifest::from_file("lux.toml")?;
                 println!("📦 Project: {} v{}", manifest.package.name, manifest.package.version);
+                
                 if let Some(deps) = manifest.dependencies {
-                    println!("📋 Dependencies:");
-                    for (name, version) in deps {
-                        println!("  - {} = {}", name, version);
-                    }
+                    deps.into_iter()
+                        .map(|(name, version)| format!("{} {}", name, version))
+                        .collect()
+                } else {
+                    println!("⚠️  No dependencies found in lux.toml");
+                    return Ok(());
                 }
             } else {
-                println!("📦 Installing single package: {}", package);
-            }
-            println!("(Implementation: Week 2)");
+                // Single package from CLI
+                vec![package]
+            };
+            
+            // Resolve dependencies
+            let resolver = Resolver::new().await?;
+            let solution = resolver.solve(&specs)?;
+            
+            println!("\n📦 Ready to install {} packages", solution.len());
+            println!("(Download step: Wednesday)");
         }
+        
         Commands::List => {
             let cache_dir = get_cache_dir();
             if cache_dir.exists() {
@@ -62,5 +86,6 @@ fn main() -> Result<()> {
             }
         }
     }
+    
     Ok(())
 }
