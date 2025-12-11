@@ -1,0 +1,14 @@
+/Users/seantitensor/Documents/lux/lux-pm/target/debug/deps/thiserror-7de2bce7e2674710.d: /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /Users/seantitensor/Documents/lux/lux-pm/target/debug/build/thiserror-aa22d178f5de3e53/out/private.rs
+
+/Users/seantitensor/Documents/lux/lux-pm/target/debug/deps/libthiserror-7de2bce7e2674710.rlib: /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /Users/seantitensor/Documents/lux/lux-pm/target/debug/build/thiserror-aa22d178f5de3e53/out/private.rs
+
+/Users/seantitensor/Documents/lux/lux-pm/target/debug/deps/libthiserror-7de2bce7e2674710.rmeta: /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs /Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs /Users/seantitensor/Documents/lux/lux-pm/target/debug/build/thiserror-aa22d178f5de3e53/out/private.rs
+
+/Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/lib.rs:
+/Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/aserror.rs:
+/Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/display.rs:
+/Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/var.rs:
+/Users/seantitensor/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.17/src/private.rs:
+/Users/seantitensor/Documents/lux/lux-pm/target/debug/build/thiserror-aa22d178f5de3e53/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/seantitensor/Documents/lux/lux-pm/target/debug/build/thiserror-aa22d178f5de3e53/out
