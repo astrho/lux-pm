@@ -1,0 +1,28 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Lux cache and environments (user data)
+.lux/
+
+# Test outputs
+*.log
+test-output/
+
+# Build artifacts
+*.conda
+*.tar.bz2
+
+# OS
+.DS_Store
+Thumbs.db
