@@ -64,17 +64,20 @@ async fn download_single_package(
     let name = &package.package_record.name;
     let version = &package.package_record.version;
     
+    // Get expected hash from metadata
+    let expected_hash_hex = hex::encode(
+        package.package_record.sha256.as_ref()
+            .context("Package missing SHA256")?
+    );
+    
+    // Build cache path using METADATA hash
+    let hash_dir = cache_dir.join(&expected_hash_hex[..2]);
+    let file_path = hash_dir.join(format!("{}.conda", &expected_hash_hex[2..]));
+    
     // Check if already cached
-    if let Some(expected_hash) = &package.package_record.sha256 {
-        let expected_hash_hex = hex::encode(expected_hash);
-        let hash_dir = cache_dir.join(&expected_hash_hex[..2]);
-        let mut file_path = hash_dir.join(&expected_hash_hex[2..]);
-        file_path.set_extension("conda");  // ← ADD THIS
-        
-        if file_path.exists() {
-            println!("  [{}/{}] ✓ {} {} (cached)", current, total, name.as_normalized(), version);
-            return Ok(());
-        }
+    if file_path.exists() {
+        println!("  [{}/{}] ✓ {} {} (cached)", current, total, name.as_normalized(), version);
+        return Ok(());
     }
     
     println!("  [{}/{}] {} {}...", current, total, name.as_normalized(), version);
@@ -94,29 +97,21 @@ async fn download_single_package(
     let computed_hash = hasher.finalize();
     let computed_hash_hex = format!("{:x}", computed_hash);
     
-    if let Some(expected_hash) = &package.package_record.sha256 {
-        let expected_hash_hex = hex::encode(expected_hash);
-        
-        if computed_hash_hex != expected_hash_hex {
-            anyhow::bail!(
-                "Hash mismatch for {}: expected {}, got {}",
-                name.as_normalized(),
-                expected_hash_hex,
-                computed_hash_hex
-            );
-        }
+    if computed_hash_hex != expected_hash_hex {
+        anyhow::bail!(
+            "Hash mismatch for {}: expected {}, got {}",
+            name.as_normalized(),
+            expected_hash_hex,
+            computed_hash_hex
+        );
     }
     
-    // Save to cache
-    let hash_dir = cache_dir.join(&computed_hash_hex[..2]);
+    // Save to cache using METADATA hash (not computed)
     fs::create_dir_all(&hash_dir).await?;
-    
-    let mut file_path = hash_dir.join(&computed_hash_hex[2..]);
-    file_path.set_extension("conda");  // ← ADD THIS
-    
     let size_kb = bytes.len() / 1024; 
     fs::write(&file_path, bytes).await?;
     
-    println!("    ✓ {} ({} KB)", name.as_normalized(), size_kb);       
+    println!("    ✓ {} ({} KB)", name.as_normalized(), size_kb);
+    
     Ok(())
 }

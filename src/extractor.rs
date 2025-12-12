@@ -32,7 +32,7 @@ impl Extractor {
                 cache_file.file_name().unwrap().to_str().unwrap());
         
         // Use extract_conda for .conda files (not extract)
-        rattler_package_streaming::tokio::fs::extract_conda(cache_file, &self.env_dir)
+        rattler_package_streaming::tokio::fs::extract_tar_bz2(cache_file, &self.env_dir)
             .await
             .context("Failed to extract package")?;
         

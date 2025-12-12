@@ -2,8 +2,10 @@ mod manifest;
 mod resolver;
 mod downloader;
 mod extractor;
+mod activator;
 
 use extractor::Extractor;
+use activator::Activator;
 use clap::{Parser, Subcommand};
 use anyhow::Result;
 use std::path::PathBuf;
@@ -24,11 +26,18 @@ enum Commands {
         package: Vec<String>,
     },
     List,
+    Activate,
+    Status,
 }
 
 fn get_cache_dir() -> Result<PathBuf> {
     let home = std::env::var("HOME")?;
     Ok(PathBuf::from(home).join(".lux/cache/pool"))
+}
+
+fn get_env_dir() -> Result<PathBuf> {
+    let home = std::env::var("HOME")?;
+    Ok(PathBuf::from(home).join(".lux/envs/default"))
 }
 
 fn init_cache() -> Result<()> {
@@ -73,22 +82,23 @@ async fn main() -> Result<()> {
             downloader.download_packages(&solution).await?;
 
             // Extract to environment
-            let env_dir = PathBuf::from(std::env::var("HOME")?)
-                .join(".lux/envs/default");
-            let extractor = Extractor::new(env_dir);
+            let env_dir = get_env_dir()?;
+            let extractor = Extractor::new(env_dir.clone());
 
             let cache_files: Vec<PathBuf> = solution.iter().map(|pkg| {
-                let hash = hex::encode(pkg.package_record.sha256.as_ref().unwrap());
-                let mut path = get_cache_dir().unwrap()
-                    .join(&hash[..2])
-                    .join(&hash[2..]);
-                path.set_extension("conda");  // ← ADD THIS - files need .conda extension
-                path
+            let hash = hex::encode(pkg.package_record.sha256.as_ref().unwrap());
+            get_cache_dir().unwrap()
+                .join(&hash[..2])
+                .join(format!("{}.conda", &hash[2..]))
             }).collect();
 
             extractor.extract_packages(&cache_files).await?;
 
             println!("\n🎉 Installation complete!");
+
+            // Show activation instructions
+            let activator = Activator::new(env_dir);
+            activator.print_instructions();
         }
         
         Commands::List => {
@@ -113,7 +123,22 @@ async fn main() -> Result<()> {
             println!("📦 Cache: {} artifacts", count);
             println!("📍 Location: {}", cache_dir.display());
         }
+
+        Commands::Activate => {
+            let env_dir = get_env_dir()?;
+            let activator = Activator::new(env_dir);
+
+            // Output the activation script to stdout
+            let script = activator.generate_activation_script()?;
+            print!("{}", script);
+        }
+
+        Commands::Status => {
+            let env_dir = get_env_dir()?;
+            let activator = Activator::new(env_dir);
+            activator.show_status()?;
+        }
     }
-    
+
     Ok(())
 }

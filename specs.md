@@ -1,0 +1,884 @@
+# Lux Package Manager (LPM) - Technical Specification
+
+**Version:** 0.1.0  
+**Date:** December 11, 2025  
+**Status:** Architecture Definition  
+**Author:** Sean  
+**Repository:** `lux-pm`
+
+## Table of Contents
+1. [Executive Summary](#executive-summary)
+2. [System Architecture](#system-architecture)
+3. [Package Format](#package-format)
+4. [Network Protocol](#network-protocol)
+5. [Dependency Resolution](#dependency-resolution)
+6. [Implementation Roadmap](#implementation-roadmap)
+7. [Testing Strategy](#testing-strategy)
+8. [Success Criteria](#success-criteria)
+
+---
+
+## 1. Executive Summary
+
+### 1.1 Purpose
+Lux Package Manager (LPM) is a **mesh-native, hermetic package manager** designed specifically for distributed robotics systems. It replaces ROS 2's fragmented toolchain (apt, rosdep, colcon) with a unified, fast, and decentralized solution.
+
+### 1.2 Core Design Principles
+1. **Mesh-First Distribution**: Robots form a peer-to-peer CDN using Zenoh
+2. **Binary-Only**: No source compilation on robots (handled by The Forge)
+3. **Hermetic Environments**: Isolated dependency trees per robot/project
+4. **Speed**: uv-class resolution performance (10-100x faster than rosdep)
+
+### 1.3 Non-Goals (Out of Scope)
+- Source compilation on robots (handled by separate Forge system)
+- Runtime process management (handled by separate Runtime system)
+- Language-specific tooling (npm/cargo remain for their ecosystems)
+
+### 1.4 Key Metrics
+| Metric | Target | Baseline (rosdep/apt) |
+|--------|--------|----------------------|
+| Dependency resolution time | <1s for 50 packages | 10-60s |
+| Package installation time | <5s for cached | 30-120s |
+| Cold start (no cache) | <30s for 10 packages | 2-5 minutes |
+| Disk usage overhead | <10% vs payload | 30-50% (apt cache) |
+
+---
+
+## 2. System Architecture
+
+### 2.1 Component Overview
+
+```
+┌─────────────────────────────────────┐
+│           Lux CLI                   │
+│  Resolver | Fetcher | Env Manager   │
+└─────────────────────────────────────┘
+                  │
+                  ↓
+┌─────────────────────────────────────┐
+│      Zenoh Mesh Network             │
+│    (Key-Value Query/Response)       │
+└─────────────────────────────────────┘
+          │               │
+          ↓               ↓
+    ┌─────────┐     ┌─────────┐
+    │ Robot A │◄───►│ Robot B │
+    └─────────┘     └─────────┘
+    ~/.lux/cache/   ~/.lux/cache/
+          │               │
+          └───────┬───────┘
+                  ↓
+        ┌──────────────────┐
+        │  HTTP Fallback   │
+        │   (S3/GitHub)    │
+        └──────────────────┘
+```
+
+### 2.2 Data Flow
+
+**Install Operation (`lux install opencv`)**
+```
+1. Resolver: Read local repodata.json or fetch via Zenoh
+2. Solver: Compute dependency graph using rattler
+3. Fetcher: For each required artifact:
+   a. Check local cache (~/.lux/cache/pool/<hash>)
+   b. Query Zenoh mesh (zpm/pool/<hash>)
+   c. Fallback to HTTP if mesh timeout (5s)
+4. Verifier: Validate SHA256 hash
+5. Installer: Extract to environment directory
+6. Activator: Generate activation script
+```
+
+**Publish Operation (`lux publish`)**
+```
+1. Scanner: Hash all files in environment
+2. Seeder: Start Zenoh queryable for local artifacts
+3. Announcer: Publish metadata to zpm/meta/peers/<robot_id>
+4. Monitor: Keep queryable alive (daemon or CLI session)
+```
+
+### 2.3 Directory Structure
+
+```
+~/.lux/
+├── cache/
+│   ├── pool/                    # Content-addressable storage
+│   │   ├── ab/                  # First 2 hex chars of SHA256
+│   │   │   └── cdef123...789   # Binary artifact
+│   ├── metadata/
+│   │   ├── repodata.json        # Index of available packages
+│   │   └── index_checksum       # Validation hash
+├── envs/
+│   ├── default/                 # Default environment
+│   │   ├── bin/
+│   │   ├── lib/
+│   │   ├── include/
+│   │   └── .lux-env.toml       # Environment manifest
+│   └── robot_v2/                # Named environment
+├── config.toml                  # User configuration
+└── lock.json                    # Global cache lock
+```
+
+---
+
+## 3. Package Format
+
+### 3.1 Package Standard: Conda Binary Format
+
+**Why Conda?**
+- Relocatable binaries (relative RPATH)
+- Cross-language support (Python, Rust, C++)
+- Production-tested (billions of downloads via conda-forge)
+- Managed by `rattler` crate (Rust implementation)
+
+**Alternatives Considered:**
+- OCI Containers: Too heavyweight for embedded (100MB+ base images)
+- Nix Store: Complex tooling, unfamiliar to robotics community
+- Homebrew Bottles: macOS-centric, limited Linux support
+
+### 3.2 Package Structure
+
+```
+package-name-1.0.0-linux_aarch64.conda
+├── info/
+│   ├── index.json           # Metadata
+│   │   {
+│   │     "name": "lidar_driver",
+│   │     "version": "1.0.0",
+│   │     "build": "h7b1234_0",
+│   │     "arch": "aarch64",
+│   │     "platform": "linux",
+│   │     "depends": [
+│   │       "zenoh-cpp >=1.0.0",
+│   │       "libusb >=1.0"
+│   │     ],
+│   │     "license": "Apache-2.0",
+│   │     "size": 4567890,
+│   │     "timestamp": 1702339200
+│   │   }
+│   ├── paths.json           # File manifest with permissions
+│   ├── run_exports.json     # ABI compatibility rules
+│   └── hash.json            # SHA256 of all files
+├── bin/
+│   └── lidar_node           # Executable (linked with ../lib)
+├── lib/
+│   ├── liblidar.so          # Shared library
+│   └── cmake/               # CMake config files
+└── include/
+    └── lidar/
+        └── driver.hpp
+```
+
+### 3.3 Relocatability Requirements
+
+**RPATH Configuration (CRITICAL)**
+```bash
+# All binaries MUST use relative RPATH
+patchelf --set-rpath '$ORIGIN/../lib' bin/lidar_node
+
+# Verify with:
+readelf -d bin/lidar_node | grep RPATH
+# Should show: $ORIGIN/../lib
+```
+
+**Known Limitations:**
+- OpenGL/GPU drivers: Cannot be fully relocated (system-dependent)
+- Hardware-specific: Device files (/dev/ttyUSB0) are absolute
+- Workaround: Use environment variables for system paths
+
+### 3.4 Metadata File (lux.toml)
+
+**Source repository manifest (before build):**
+```toml
+[package]
+name = "lidar_fusion_node"
+version = "2.1.0"
+description = "Fuses LiDAR scans with odometry"
+license = "Apache-2.0"
+repository = "https://github.com/user/lidar_fusion"
+homepage = "https://docs.example.com/lidar"
+
+[dependencies]
+# Runtime dependencies
+zenoh-cpp = "^1.0.0"
+opencv = ">=4.8.0, <5.0"
+eigen = "3.4.*"
+
+# Optional features
+[dependencies.cuda]
+optional = true
+version = ">=11.0"
+
+[build-dependencies]
+# Only needed during compilation (handled by Forge)
+cmake = ">=3.20"
+protobuf-compiler = "*"
+
+[target.linux-aarch64]
+# Platform-specific dependencies
+gpio-control = "1.1.0"
+
+[features]
+default = ["slam"]
+slam = []  # Feature flag
+cuda_accel = ["cuda"]
+```
+
+---
+
+## 4. Network Protocol
+
+### 4.1 Zenoh Key Design
+
+**Key Space Layout:**
+```
+lux/
+├── idx/<channel>/<arch>/repodata.json    # Package index
+├── pool/<sha256_hash>                    # Binary artifacts
+├── meta/
+│   ├── peers/<robot_id>                  # Peer discovery
+│   │   {
+│   │     "robot_id": "rover_001",
+│   │     "last_seen": 1702339200,
+│   │     "cached_packages": ["opencv", "zenoh-cpp"],
+│   │     "available_hashes": ["abc123...", "def456..."]
+│   │   }
+│   └── stats/<robot_id>                  # Bandwidth stats
+└── locks/<env_hash>                      # Distributed locking
+```
+
+### 4.2 Query Patterns
+
+**Fetch Artifact (Critical Path)**
+```rust
+// Client side: Request artifact
+let request = zenoh_session
+    .get("lux/pool/abc123def456...789")
+    .target(QueryTarget::BestMatching)  // Closest peer
+    .timeout(Duration::from_secs(5))
+    .await?;
+
+// Chunks received via stream
+for reply in request {
+    let chunk = reply.sample.payload.contiguous();
+    hasher.update(&chunk);
+    file.write_all(&chunk)?;
+}
+
+// Validate hash
+assert_eq!(hasher.finalize(), expected_hash);
+```
+
+**Serve Artifact (Queryable)**
+```rust
+// Server side: Respond to requests
+let queryable = zenoh_session
+    .declare_queryable("lux/pool/*")
+    .await?;
+
+while let Ok(query) = queryable.recv_async().await {
+    let hash = extract_hash(&query.key_expr());
+    
+    if let Some(path) = cache.find_artifact(hash) {
+        let data = tokio::fs::read(path).await?;
+        
+        // Stream in 64KB chunks
+        for chunk in data.chunks(65536) {
+            query.reply(Ok(chunk.to_vec())).await?;
+        }
+    }
+}
+```
+
+### 4.3 Scout Protocol
+
+**Multi-Peer Resolution:**
+```
+1. Client broadcasts GET to lux/pool/<hash>
+2. All peers with artifact respond with metadata:
+   - Estimated latency (RTT)
+   - Current bandwidth usage
+   - Battery level (for mobile robots)
+3. Client selects best peer (lowest latency + available bandwidth)
+4. Stream data from selected peer
+5. If stream fails mid-transfer:
+   a. Mark peer as unreliable (exponential backoff)
+   b. Request from next-best peer
+   c. Resume from last verified chunk (using Content-Range header pattern)
+```
+
+### 4.4 Fallback Strategy
+
+**Decision Tree:**
+```rust
+async fn fetch_artifact(hash: &str) -> Result<Bytes> {
+    // 1. Check local cache
+    if let Some(data) = local_cache.get(hash)? {
+        return Ok(data);
+    }
+    
+    // 2. Query mesh with 5s timeout
+    match query_zenoh_mesh(hash).timeout(Duration::from_secs(5)).await {
+        Ok(Ok(data)) => {
+            local_cache.store(hash, &data)?;
+            return Ok(data);
+        }
+        Ok(Err(e)) => warn!("Mesh fetch failed: {}", e),
+        Err(_) => warn!("Mesh query timeout"),
+    }
+    
+    // 3. Fallback to HTTP
+    let url = format!("{}/pool/{}", FORGE_URL, hash);
+    let data = reqwest::get(&url).await?.bytes().await?;
+    
+    // 4. Verify and cache
+    verify_hash(&data, hash)?;
+    local_cache.store(hash, &data)?;
+    
+    // 5. Seed to mesh for future peers
+    spawn_seeder(hash, data.clone());
+    
+    Ok(data)
+}
+```
+
+### 4.5 Bandwidth Management
+
+**Rate Limiting:**
+```rust
+struct BandwidthLimiter {
+    max_upload_mbps: f64,    // Per-peer upload cap
+    max_download_mbps: f64,  // Total download cap
+    current_streams: usize,
+}
+
+impl BandwidthLimiter {
+    fn can_serve_peer(&self) -> bool {
+        self.current_streams < self.max_concurrent &&
+        self.current_upload_rate() < self.max_upload_mbps
+    }
+}
+```
+
+**Priority Queuing:**
+- Critical packages (safety systems): Priority 1
+- Active development: Priority 2
+- Background sync: Priority 3
+
+---
+
+## 5. Dependency Resolution
+
+### 5.1 Solver: Rattler Integration
+
+**Why Rattler?**
+- Rust implementation of conda's solver (fast)
+- PubGrub algorithm (conflict-driven clause learning)
+- Battle-tested (powers pixi, mamba)
+
+**Resolution Process:**
+```rust
+use rattler_solve::{SolverTask, ChannelPriority};
+
+async fn resolve_dependencies(
+    specs: &[MatchSpec],
+    locked: &LockFile,
+) -> Result<ResolvedPackages> {
+    // 1. Load repository metadata
+    let repodata = load_repodata_from_mesh().await?;
+    
+    // 2. Create solver task
+    let task = SolverTask {
+        specs: specs.to_vec(),
+        locked_packages: locked.packages(),
+        virtual_packages: detect_platform(),  // CUDA, GLIBC version
+        channel_priority: ChannelPriority::Strict,
+    };
+    
+    // 3. Solve (PubGrub algorithm)
+    let solution = task.solve(&repodata)?;
+    
+    // 4. Verify solution is complete
+    verify_all_deps_satisfied(&solution)?;
+    
+    Ok(solution)
+}
+```
+
+### 5.2 Lock File Format
+
+**Purpose:** Reproducible builds across robots
+
+```toml
+# lux-lock.toml (generated, do not edit manually)
+version = 1
+
+[metadata]
+generated_at = "2025-12-11T10:30:00Z"
+lux_version = "0.1.0"
+platform = "linux-aarch64"
+
+[[package]]
+name = "opencv"
+version = "4.8.1"
+build = "py310h1234567_0"
+arch = "aarch64"
+sha256 = "abc123def456..."
+source = "mesh://forge.example.com/main"
+
+[[package]]
+name = "zenoh-cpp"
+version = "1.0.0"
+build = "h7891011_0"
+arch = "aarch64"
+sha256 = "789abc012345..."
+source = "mesh://forge.example.com/main"
+depends = ["zenoh-c =1.0.0"]
+
+[[package]]
+name = "zenoh-c"
+version = "1.0.0"
+build = "h1357902_0"
+arch = "aarch64"
+sha256 = "456def789012..."
+source = "mesh://forge.example.com/main"
+```
+
+### 5.3 Conflict Resolution
+
+**Automatic Resolution:**
+```
+User requests:
+  - package_a = 1.0.0  (requires lib_x ^2.0)
+  - package_b = 2.0.0  (requires lib_x ^3.0)
+
+Solver detects conflict:
+  - lib_x cannot satisfy both ^2.0 and ^3.0
+
+Error Message:
+â”Œâ”€ Dependency Conflict
+â”‚
+â”‚ Cannot install both:
+â”‚   â€¢ package_a 1.0.0 (requires lib_x >=2.0, <3.0)
+â”‚   â€¢ package_b 2.0.0 (requires lib_x >=3.0, <4.0)
+â”‚
+â”‚ Suggestions:
+â”‚   1. Downgrade package_b to 1.x (requires lib_x ^2.0)
+â”‚   2. Upgrade package_a to 2.x (requires lib_x ^3.0)
+â”‚   3. Use separate environments for conflicting packages
+â”‚
+â””â”€ Run 'lux explain lib_x' for more details
+```
+
+### 5.4 Platform Detection
+
+**Virtual Packages (System Capabilities):**
+```rust
+struct VirtualPackages {
+    __glibc: String,        // e.g., "2.35"
+    __linux: String,        // Kernel version
+    __archspec: String,     // "aarch64", "x86_64"
+    __cuda: Option<String>, // CUDA version if available
+    __gles: Option<String>, // OpenGL ES version
+}
+
+fn detect_virtual_packages() -> VirtualPackages {
+    VirtualPackages {
+        __glibc: read_glibc_version(),
+        __linux: read_kernel_version(),
+        __archspec: std::env::consts::ARCH.to_string(),
+        __cuda: detect_cuda_version().ok(),
+        __gles: detect_gles_version().ok(),
+    }
+}
+```
+
+---
+
+## 6. Implementation Roadmap
+
+### 6.1 Phase 1: Core CLI (Weeks 1-4)
+
+**Deliverables:**
+- [ ] `lux init` - Create ~/.lux/ structure
+- [ ] `lux install <package>` - Install from HTTP (no mesh yet)
+- [ ] `lux list` - Show installed packages
+- [ ] `lux remove <package>` - Uninstall package
+- [ ] `lux env create <name>` - Create isolated environment
+- [ ] `lux env activate <name>` - Activate environment
+
+**Dependencies:**
+```toml
+[dependencies]
+rattler = "0.27"           # Conda solver
+rattler_conda_types = "0.27"
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+sha2 = "0.10"
+hex = "0.4"
+```
+
+**Success Criteria:**
+- Resolves 50-package dependency graph in <1s
+- Installs cached package in <5s
+- Environment activation works (PATH, LD_LIBRARY_PATH set correctly)
+
+### 6.2 Phase 2: Zenoh Integration (Weeks 5-8)
+
+**Deliverables:**
+- [ ] `lux publish` - Seed local packages to mesh
+- [ ] `lux peers` - List available peers
+- [ ] Modify `install` to scout mesh before HTTP
+- [ ] Implement chunked artifact streaming
+- [ ] Add bandwidth limiting
+
+**New Dependencies:**
+```toml
+zenoh = "1.0"
+zenoh-config = "1.0"
+```
+
+**Success Criteria:**
+- Mesh transfer 2x faster than HTTP for 100MB package on WiFi
+- Automatic fallback when mesh unavailable
+- Graceful handling of peer disconnections mid-stream
+
+### 6.3 Phase 3: Polish & Optimization (Weeks 9-12)
+
+**Deliverables:**
+- [ ] `lux search <query>` - Search available packages
+- [ ] `lux doctor` - Diagnose environment issues
+- [ ] `lux clean` - Clear unused cache entries
+- [ ] Parallel downloads (5 concurrent packages)
+- [ ] Progress bars and better UX
+- [ ] Shell completion (bash, zsh, fish)
+
+**Success Criteria:**
+- Cold install of 10 packages completes in <30s
+- Cache uses <110% of actual package sizes
+- All commands have helpful error messages
+
+### 6.4 Phase 4: Production Hardening (Weeks 13-16)
+
+**Deliverables:**
+- [ ] Package signing and verification (GPG)
+- [ ] Corruption detection and recovery
+- [ ] Audit log of all installations
+- [ ] Telemetry (optional, opt-in)
+
+---
+
+## 7. Testing Strategy
+
+### 7.1 Unit Tests
+
+**Coverage Target: >80%**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_hash_verification() {
+        let data = b"test package data";
+        let expected = "sha256:abc123...";
+        assert!(verify_hash(data, expected).is_ok());
+    }
+    
+    #[test]
+    fn test_dependency_resolution() {
+        let specs = vec![
+            MatchSpec::from_str("opencv>=4.8").unwrap(),
+        ];
+        let solution = resolve_dependencies(&specs, &LockFile::empty()).unwrap();
+        assert!(solution.contains_package("opencv"));
+    }
+    
+    #[tokio::test]
+    async fn test_mesh_fallback() {
+        // Simulate mesh timeout
+        let hash = "abc123def";
+        let result = fetch_artifact(hash).await;
+        assert!(result.is_ok());
+        // Verify it fell back to HTTP
+    }
+}
+```
+
+### 7.2 Integration Tests
+
+**Scenarios:**
+1. **Fresh Install**: Empty ~/.lux/, install 5 packages, verify all files present
+2. **Mesh Transfer**: Robot A publishes, Robot B installs from A (no internet)
+3. **Conflict Resolution**: Request incompatible packages, verify error message
+4. **Partial Download**: Kill process mid-transfer, restart, verify resume
+5. **Cache Corruption**: Corrupt one cached file, verify re-download
+
+### 7.3 Benchmark Suite
+
+```rust
+// benchmarks/install_speed.rs
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
+fn benchmark_resolution(c: &mut Criterion) {
+    c.bench_function("resolve 50 packages", |b| {
+        b.iter(|| {
+            let specs = load_test_specs("fixtures/large_project.toml");
+            resolve_dependencies(black_box(&specs), &LockFile::empty())
+        })
+    });
+}
+
+criterion_group!(benches, benchmark_resolution);
+criterion_main!(benches);
+```
+
+**Comparison Baseline:**
+| Operation | Lux Target | rosdep/apt Baseline |
+|-----------|-----------|---------------------|
+| Resolve 50 packages | <1s | 10-60s |
+| Install 10 packages (cached) | <5s | 30-120s |
+| Install 10 packages (cold) | <30s | 2-5 minutes |
+
+---
+
+## 8. Success Criteria
+
+### 8.1 Functional Requirements
+
+**Must Have (MVP):**
+- âœ… Install packages from HTTP registry
+- âœ… Hermetic environments (no conflicts between projects)
+- âœ… Dependency resolution with clear error messages
+- âœ… Lock file generation for reproducibility
+
+**Should Have (V1.0):**
+- âœ… Mesh-based distribution (peer-to-peer)
+- âœ… Automatic fallback to HTTP
+- âœ… Parallel downloads
+- âœ… Package signing/verification
+
+**Nice to Have (Future):**
+- Incremental package updates (delta patches)
+- Cross-compilation support
+- Package mirrors/caching proxies
+
+### 8.2 Non-Functional Requirements
+
+**Performance:**
+- Dependency resolution: <1s for 50 packages
+- Installation: <5s for cached, <30s for cold
+- Mesh transfer: >10 MB/s on 100Mbps network
+
+**Reliability:**
+- Handle 90% of network failures gracefully (retry/fallback)
+- Detect and recover from cache corruption automatically
+- Zero data loss during interrupted transfers (resume support)
+
+**Usability:**
+- Install on fresh system: `curl -sSf lux.sh | sh` (one command)
+- Error messages include actionable suggestions
+- Shell completion for all commands
+
+### 8.3 Validation Experiments
+
+**Week 1: Proof of Concept**
+- [ ] Rattler resolves realistic dependency graph
+- [ ] Relocated binaries execute on Raspberry Pi
+
+**Week 6: Mesh Validation**
+- [ ] Transfer 100MB package between 2 Pis via Zenoh
+- [ ] Measure: faster than HTTP? By how much?
+- [ ] What's CPU/memory overhead?
+
+**Week 12: End-to-End**
+- [ ] Deploy 3-robot fleet
+- [ ] Update 1 robot, others sync automatically
+- [ ] Measure: total update time, bandwidth used
+
+### 8.4 Go/No-Go Checkpoints
+
+**End of Phase 1 (Week 4):**
+- Resolver works on realistic projects (50+ packages)
+- Installation completes without errors
+- **Decision:** Continue to mesh integration
+
+**End of Phase 2 (Week 8):**
+- Mesh transfer demonstrably faster than HTTP (â‰¥1.5x)
+- Fallback mechanism reliable
+- **Decision:** Continue to polish OR pivot to simpler HTTP-only design
+
+---
+
+## 9. Open Questions
+
+### 9.1 Technical Decisions Needed
+
+**Q1: How to handle platform-specific builds?**
+- Option A: Pre-build matrix (aarch64, x86_64) Ã— (ubuntu20, ubuntu22, ubuntu24)
+- Option B: Build on-demand (first request triggers Forge build)
+- Option C: User provides build matrix in lux.toml
+
+**Recommendation:** Start with Option A (pre-build common platforms), add Option B later.
+
+---
+
+**Q2: Package signing - required or optional?**
+- Security: Prevents malicious package injection
+- Complexity: Requires key management infrastructure
+- User burden: Must verify signatures (or trust keyring)
+
+**Recommendation:** Optional in MVP, required for production use (warn if unsigned).
+
+---
+
+**Q3: Garbage collection strategy?**
+- When to evict cached packages?
+- LRU? Size-based? Manual only?
+
+**Recommendation:** Manual (`lux clean`) in MVP. Add `lux gc --auto` in V1.0 that runs weekly, keeps last 30 days + actively used packages.
+
+---
+
+**Q4: How to version the repository metadata (repodata.json)?**
+- Problem: Breaking changes to schema could break old clients
+- Option A: Semantic versioning in filename (repodata-v1.json)
+- Option B: Version field in JSON, client checks compatibility
+
+**Recommendation:** Option B. Include `{"version": 1, ...}` in repodata.json. Client refuses to parse if version > MAX_SUPPORTED_VERSION.
+
+---
+
+### 9.2 Research Questions
+
+**Q1: Does Zenoh mesh distribution actually provide significant speedup?**
+- **Experiment (Week 6):** Benchmark 100MB transfer: mesh vs HTTP
+- **Hypothesis:** Mesh is 2-5x faster on local network
+- **If false:** Simplify to HTTP-only, remove mesh complexity
+
+---
+
+**Q2: Can relocated binaries actually work for complex robotics packages?**
+- **Experiment (Week 1):** Build OpenCV with relative RPATH, test on 2 different systems
+- **Hypothesis:** Works for most packages, fails for hardware-specific (GPU drivers)
+- **If false:** Need per-machine builds or hybrid approach
+
+---
+
+**Q3: What's the largest realistic dependency graph size?**
+- **Research:** Analyze ROS 2 packages (how many deps does nav2 have?)
+- **Hypothesis:** <100 packages for typical robot
+- **Impact:** Determines solver optimization priority
+
+---
+
+## 10. Appendix
+
+### 10.1 Key Dependencies
+
+```toml
+[dependencies]
+# Core
+rattler = "0.27"              # Conda solver and types
+rattler_conda_types = "0.27"   # Package format handling
+zenoh = "1.0"                  # Mesh networking
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Crypto
+sha2 = "0.10"
+hex = "0.4"
+
+# HTTP fallback
+reqwest = { version = "0.12", features = ["stream"] }
+
+# Utils
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+```
+
+### 10.2 CLI Command Reference
+
+```bash
+# Initialize
+lux init                           # Create ~/.lux/ structure
+
+# Package Management
+lux install <pkg> [--env <name>]   # Install package
+lux remove <pkg>                   # Uninstall package
+lux list                           # List installed packages
+lux search <query>                 # Search available packages
+lux show <pkg>                     # Show package details
+
+# Environment Management
+lux env create <name>              # Create new environment
+lux env list                       # List environments
+lux env activate <name>            # Activate environment
+lux env remove <name>              # Delete environment
+
+# Mesh Operations
+lux publish [--keep-alive]         # Seed packages to mesh
+lux peers                          # List available peers
+lux sync                           # Force sync with peers
+
+# Maintenance
+lux clean [--all]                  # Clear cache
+lux doctor                         # Diagnose issues
+lux update                         # Update package index
+
+# Advanced
+lux lock                           # Generate/update lock file
+lux explain <pkg>                  # Explain dependency chain
+lux verify                         # Verify all checksums
+```
+
+### 10.3 Configuration File
+
+```toml
+# ~/.lux/config.toml
+[network]
+mesh_enabled = true
+mesh_timeout_secs = 5
+max_concurrent_downloads = 5
+bandwidth_limit_mbps = 50.0
+
+[cache]
+max_size_gb = 10.0
+gc_policy = "lru"  # "lru", "size", "manual"
+gc_retention_days = 30
+
+[registry]
+default_channel = "https://forge.example.com/main"
+extra_channels = [
+    "https://forge.example.com/testing",
+]
+
+[install]
+verify_signatures = true  # Require signed packages
+allow_unsigned_dev = true # Allow unsigned in dev mode
+
+[telemetry]
+enabled = false  # Opt-in only
+anonymous_id = "uuid-here"
+```
+
+---
+
+**END OF LPM SPECIFICATION**
+
+**Next Steps:**
+1. Review this spec with advisor
+2. Validate Zenoh transfer speeds (Week 1 experiment)
+3. Validate relocatable binaries (Week 1 experiment)
+4. Begin Phase 1 implementation if validations pass
